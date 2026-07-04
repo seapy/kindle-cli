@@ -143,3 +143,85 @@ func TestPatchFileRoundtrip(t *testing.T) {
 		t.Errorf("value = %q, want PDOC", value)
 	}
 }
+
+// makeMobiFull builds a PalmDB blob with a MOBI header (full-name fields)
+// plus EXTH author/title/cdetype records, mimicking a real AZW3 head.
+func makeMobiFull(title string, authors []string, exthTitle string) []byte {
+	rec0 := 100
+
+	u32 := func(v int) []byte {
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(v))
+		return b
+	}
+
+	var records []byte
+	count := 0
+	add := func(rtype int, val []byte) {
+		records = append(records, u32(rtype)...)
+		records = append(records, u32(8+len(val))...)
+		records = append(records, val...)
+		count++
+	}
+	for _, a := range authors {
+		add(100, []byte(a))
+	}
+	if exthTitle != "" {
+		add(503, []byte(exthTitle))
+	}
+	add(EXTHCDEType, []byte("PDOC"))
+
+	var exth []byte
+	exth = append(exth, "EXTH"...)
+	exth = append(exth, u32(12+len(records))...)
+	exth = append(exth, u32(count)...)
+	exth = append(exth, records...)
+
+	// record 0: 16-byte PalmDOC stand-in, "MOBI" magic, header up to the
+	// full-name fields at +84/+88, then EXTH, then the full name
+	header := make([]byte, 92)
+	copy(header[16:], "MOBI")
+	fullnameOff := len(header) + len(exth)
+	binary.BigEndian.PutUint32(header[84:88], uint32(fullnameOff))
+	binary.BigEndian.PutUint32(header[88:92], uint32(len(title)))
+
+	buf := make([]byte, rec0+len(header)+len(exth)+len(title))
+	binary.BigEndian.PutUint16(buf[76:78], 1)
+	binary.BigEndian.PutUint32(buf[78:82], uint32(rec0))
+	copy(buf[rec0:], header)
+	copy(buf[rec0+len(header):], exth)
+	copy(buf[rec0+fullnameOff:], title)
+	return buf
+}
+
+func TestReadSummaryFromEXTH(t *testing.T) {
+	data := makeMobiFull("풀네임 제목", []string{"저자1", "저자2"}, "EXTH 제목")
+	s := ReadSummary(data)
+	if s.Title != "EXTH 제목" {
+		t.Errorf("Title = %q, want the EXTH 503 value", s.Title)
+	}
+	if s.Author != "저자1, 저자2" {
+		t.Errorf("Author = %q, want joined authors", s.Author)
+	}
+	if s.CDEType != "PDOC" {
+		t.Errorf("CDEType = %q, want PDOC", s.CDEType)
+	}
+}
+
+func TestReadSummaryFullNameFallback(t *testing.T) {
+	data := makeMobiFull("풀네임 제목", nil, "")
+	s := ReadSummary(data)
+	if s.Title != "풀네임 제목" {
+		t.Errorf("Title = %q, want the MOBI full name", s.Title)
+	}
+	if s.Author != "" {
+		t.Errorf("Author = %q, want empty", s.Author)
+	}
+}
+
+func TestReadSummaryGarbage(t *testing.T) {
+	s := ReadSummary([]byte("not a mobi file at all"))
+	if s != (Summary{}) {
+		t.Errorf("Summary = %+v, want zero value", s)
+	}
+}

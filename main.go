@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -260,7 +261,108 @@ func pushAndVerify(device *kindle.Kindle, path string, opts *options) error {
 	return nil
 }
 
+// runLS lists the books in the connected Kindle's documents folder.
+func runLS(args []string) int {
+	fs := flag.NewFlagSet("kindle-cli ls", flag.ExitOnError)
+	all := fs.Bool("all", false, "include sidecar folders and hidden files")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), `usage: kindle-cli ls [--all]
+
+List the books in the connected Kindle's documents folder, with their
+cdetype tag (PDOC shows covers; EBOK risks the grey-cover problem).
+
+options:
+`)
+		fs.PrintDefaults()
+	}
+	fs.Parse(args)
+
+	device, err := kindle.Detect()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
+		return 3
+	}
+	entries, err := device.List()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
+		return 3
+	}
+
+	books := 0
+	var total int64
+	var lines [][3]string // type, size, name+detail
+	for _, e := range entries {
+		hidden := strings.HasPrefix(e.Name, ".") || strings.HasSuffix(e.Name, ".sdr")
+		if e.Dir || hidden {
+			if *all && hidden {
+				lines = append(lines, [3]string{"-", humanSize(e.Size), e.Name})
+			}
+			continue
+		}
+		tag, name := "-", e.Name
+		if isMobiLike(e.Name) {
+			if head, err := device.ReadHead(e.Name, 64*1024); err == nil {
+				s := patch.ReadSummary(head)
+				if s.CDEType != "" {
+					tag = s.CDEType
+				}
+				// annotate with the embedded metadata unless the filename
+				// already is "Title - Author" / "Title"
+				stem := strings.TrimSuffix(e.Name, filepath.Ext(e.Name))
+				if s.Title != "" && stem != s.Title && stem != s.Title+" - "+s.Author {
+					detail := s.Title
+					if s.Author != "" {
+						detail += " — " + s.Author
+					}
+					name += "  (" + detail + ")"
+				}
+			}
+			books++
+			total += e.Size
+		}
+		lines = append(lines, [3]string{tag, humanSize(e.Size), name})
+	}
+
+	fmt.Printf("▶ %s — documents/: %d book(s), %s\n\n", prettyHost(device.Host), books, humanSize(total))
+	for _, l := range lines {
+		fmt.Printf("  %-5s %9s  %s\n", l[0], l[1], l[2])
+	}
+	return 0
+}
+
+func isMobiLike(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".azw3", ".mobi", ".azw":
+		return true
+	}
+	return false
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1f MB", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1f kB", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+var serialRe = regexp.MustCompile(` [A-Z0-9]{12,}$`)
+
+// prettyHost turns the MTP host id into something readable:
+// Amazon_Kindle_Colorsoft_…_GN44… → "Kindle Colorsoft …".
+func prettyHost(host string) string {
+	s := strings.ReplaceAll(strings.TrimPrefix(host, "Amazon_"), "_", " ")
+	return serialRe.ReplaceAllString(s, "")
+}
+
 func run() int {
+	if len(os.Args) > 1 && os.Args[1] == "ls" {
+		return runLS(os.Args[2:])
+	}
+
 	opts := &options{}
 	showVersion := false
 
@@ -276,10 +378,14 @@ func run() int {
 	fs.BoolVar(&showVersion, "version", false, "show version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `usage: kindle-cli [options] inputs...
+       kindle-cli ls [--all]
 
 Convert EPUBs to Kindle personal documents (PDOC AZW3) and sideload them so
 covers show on modern (2024+) Kindles. AZW3/MOBI inputs skip conversion and
 are pushed as-is (re-tagged PDOC on a copy when needed).
+
+subcommands:
+  ls          list the books on the connected device (name, size, cdetype)
 
 positional arguments:
   inputs      EPUB/AZW3/MOBI file(s), a directory, or a glob

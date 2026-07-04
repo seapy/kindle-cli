@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- `kindle-cli ls` 서브커맨드: 연결된 기기의 documents/ 목록을 크기·cdetype
+  태그(PDOC/EBOK)와 함께 표시. 파일명에 없는 제목/저자는 EXTH 메타데이터로
+  보충하고, `--all`로 사이드카(.sdr)·숨김 파일까지 볼 수 있음.
 - `curl … | sh` 원라이너 설치 스크립트(`install.sh`): 플랫폼 자동 감지,
   최신 릴리스 다운로드, 체크섬 검증 후 `~/.local/bin`에 설치.
   `KINDLE_CLI_VERSION`/`KINDLE_CLI_INSTALL_DIR`로 버전·위치 지정 가능.

@@ -127,6 +127,21 @@ kindle-cli "books/*.epub"                # globs expand internally too (Windows 
 kindle-cli --no-push book.epub           # just build book.azw3, don't touch the device
 kindle-cli --out-dir ./out book.epub     # write the AZW3 to ./out instead
 kindle-cli --title "Flash Boys" --author "Michael Lewis" book.epub
+kindle-cli ls                            # what's on the device right now?
+```
+
+`kindle-cli ls` lists the device's `documents/` folder with each book's
+size and `cdetype` tag, so you can spot `EBOK` strays (grey covers, deletion
+risk) at a glance:
+
+```console
+$ kindle-cli ls
+▶ Kindle Colorsoft Signature Edition — documents/: 3 book(s), 7.3 MB
+
+  -       13.6 MB  소프트웨어 엔지니어 가이드북.epub
+  PDOC     2.3 MB  우버 인사이드 - 애덤 라신스키.azw3
+  PDOC     3.6 MB  프로젝트 헤일메리 - 앤디 위어.azw3
+  PDOC     1.3 MB  플래시 보이스 - 마이클 루이스.azw3
 ```
 
 The converted AZW3 is a kept artifact: it lands **next to the source EPUB**

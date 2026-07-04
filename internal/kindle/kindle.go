@@ -13,10 +13,12 @@ package kindle
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -160,6 +162,65 @@ func (k *Kindle) Push(azw3 string, replace bool, log func(string)) (string, erro
 		return "", fmt.Errorf("gio copy failed: %s", msg)
 	}
 	return k.Documents + "/" + name, nil
+}
+
+// Entry is one item in the device's documents folder.
+type Entry struct {
+	Name string
+	Size int64
+	Dir  bool
+}
+
+// List returns the contents of documents/, name-sorted.
+func (k *Kindle) List() ([]Entry, error) {
+	result := k.gio("list", "-l", k.Documents)
+	if result.code != 0 {
+		msg := strings.TrimSpace(result.stderr)
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return nil, fmt.Errorf("gio list failed: %s", msg)
+	}
+	entries := parseGioList(result.stdout)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	return entries, nil
+}
+
+// parseGioList parses `gio list -l` output: one "name\tsize\t(type)" per line.
+func parseGioList(out string) []Entry {
+	var entries []Entry
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 3 || fields[0] == "" {
+			continue
+		}
+		size, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, Entry{
+			Name: fields[0],
+			Size: size,
+			Dir:  strings.Contains(fields[2], "directory"),
+		})
+	}
+	return entries
+}
+
+// ReadHead returns up to n bytes from the start of documents/<name>, read
+// through the gvfs FUSE mount.
+func (k *Kindle) ReadHead(name string, n int) ([]byte, error) {
+	f, err := os.Open(k.Documents + "/" + name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	read, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf[:read], nil
 }
 
 // SizeOnDevice returns the byte size of documents/<name>, or -1 when it
