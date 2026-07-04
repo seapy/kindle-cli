@@ -13,6 +13,12 @@ All notable changes to this project are documented here. The format is based on
   KF8 writer + 자체 EPUB 리더)로 Calibre 등 외부 의존성 없이 동작.
 - `cdetype`을 생성 시점에 `PDOC`(EXTH 501)으로 기록해 최신(2024+) Kindle에서
   커버가 표시됨; `--keep-ebok`으로 `EBOK` 유지 가능.
+- 책 내부 하이퍼링크(각주 점프, 상호 참조)를 KF8 위치 링크
+  (`kindle:pos:fid:…:off:…`)로 변환 — 기기에서 탭하면 실제로 점프함.
+  대상 id가 없는 링크는 챕터 시작으로 폴백.
+- 이미지(JPEG/PNG/GIF)는 원본 바이트 그대로 임베드 — 재인코딩 손실 없음,
+  PNG 투명도 보존. Kindle이 못 그리는 변종(프로그레시브/CMYK JPEG 등)만
+  베이스라인 JPEG으로 재인코딩.
 - AZW3/MOBI 입력은 변환 없이 푸시. `cdetype`을 확인해 필요하면 사본에만
   `PDOC`으로 재태깅하고 원본은 수정하지 않음.
 - 변환된 AZW3는 원본 EPUB 옆에 같은 이름으로 저장; `--out-dir`로 위치 변경.
@@ -25,5 +31,3 @@ All notable changes to this project are documented here. The format is based on
 
 ### Conversion notes
 - 임베디드 폰트는 제거됨(기기 폰트 사용; 출력이 훨씬 작아짐).
-- 책 내부 하이퍼링크(각주 점프)는 일반 텍스트로 평탄화됨.
-- 이미지는 JPEG으로 재인코딩되며 투명 배경은 흰색으로 합성됨.

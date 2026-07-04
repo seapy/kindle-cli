@@ -12,14 +12,34 @@ import (
 // pages on-device even though the text is present in the file.
 const maxChunkBytes = 7600
 
+// chunkPos locates an emitted start tag: the chunk's index within the
+// chapter and the byte offset of the tag's '<' inside that chunk's body.
+// This is exactly the coordinate a kindle:pos:fid:off link needs, since the
+// KF8 fragment table records each chunk's body start as its position.
+type chunkPos struct {
+	chunk int
+	off   int
+}
+
+// anchorMark is a link-target start tag found while serializing a subtree,
+// at off bytes into the serialized string.
+type anchorMark struct {
+	key string
+	off int
+}
+
 // splitNodes serializes nodes (the children of a chapter's <body>) into one
 // or more XHTML chunks of at most roughly maxBytes each. Chunks are always
 // balanced: when a split lands inside an element, the element is closed at
 // the chunk boundary and reopened in the next chunk. wrapper, when non-nil,
 // is an element (not serialized as part of the input) that wraps every chunk
 // — used to carry the original <body>'s class/style.
-func splitNodes(nodes []*html.Node, wrapper *html.Node, maxBytes int) []string {
-	c := &chunker{max: maxBytes}
+//
+// wanted names link-target ids (or <a name>s); the returned map holds the
+// position of each one's first emitted start tag. Tags reopened at chunk
+// boundaries never win: the original emission always comes first.
+func splitNodes(nodes []*html.Node, wrapper *html.Node, maxBytes int, wanted map[string]bool) ([]string, map[string]chunkPos) {
+	c := &chunker{max: maxBytes, wanted: wanted, anchors: map[string]chunkPos{}}
 	if wrapper != nil {
 		c.push(wrapper)
 	}
@@ -27,7 +47,7 @@ func splitNodes(nodes []*html.Node, wrapper *html.Node, maxBytes int) []string {
 		c.emit(n)
 	}
 	c.flush()
-	return c.chunks
+	return c.chunks, c.anchors
 }
 
 type chunker struct {
@@ -36,10 +56,26 @@ type chunker struct {
 	cur    strings.Builder
 	open   []*html.Node // elements reopened at the start of every chunk
 	base   int          // cur length right after reopening tags (empty-chunk marker)
+
+	wanted  map[string]bool     // link-target ids to locate
+	anchors map[string]chunkPos // id → first emitted position
+}
+
+// note records marks — relative to the current write position — for wanted
+// ids not yet seen. Call just before writing the string they refer to.
+func (c *chunker) note(marks []anchorMark) {
+	for _, m := range marks {
+		if _, dup := c.anchors[m.key]; !dup {
+			c.anchors[m.key] = chunkPos{chunk: len(c.chunks), off: c.cur.Len() + m.off}
+		}
+	}
 }
 
 // push opens an element for the remainder of the traversal.
 func (c *chunker) push(n *html.Node) {
+	for _, key := range wantedKeys(n, c.wanted) {
+		c.note([]anchorMark{{key: key}})
+	}
 	c.cur.WriteString(startTag(n, false))
 	c.open = append(c.open, n)
 }
@@ -82,16 +118,18 @@ func (c *chunker) emit(n *html.Node) {
 		return // comments, doctypes: dropped
 	}
 
-	rendered := renderXHTML(n)
+	rendered, marks := renderMarked(n, c.wanted)
 	if !c.fits(len(rendered)) && c.cur.Len() > c.base {
 		c.flush()
 	}
 	if c.fits(len(rendered)) {
+		c.note(marks)
 		c.cur.WriteString(rendered)
 		return
 	}
 	// the element alone exceeds a chunk: descend, splitting between children
 	if n.FirstChild == nil || isRawText(n) {
+		c.note(marks)
 		c.cur.WriteString(rendered) // childless or unsplittable; keep whole
 		return
 	}
@@ -141,11 +179,19 @@ func (c *chunker) emitText(escaped string) {
 // whole part render empty.
 func renderXHTML(n *html.Node) string {
 	var sb strings.Builder
-	writeXHTML(&sb, n)
+	writeXHTML(&sb, n, nil, nil)
 	return sb.String()
 }
 
-func writeXHTML(sb *strings.Builder, n *html.Node) {
+// renderMarked is renderXHTML plus the positions of wanted link targets.
+func renderMarked(n *html.Node, wanted map[string]bool) (string, []anchorMark) {
+	var sb strings.Builder
+	var marks []anchorMark
+	writeXHTML(&sb, n, wanted, &marks)
+	return sb.String(), marks
+}
+
+func writeXHTML(sb *strings.Builder, n *html.Node, wanted map[string]bool, marks *[]anchorMark) {
 	switch n.Type {
 	case html.TextNode:
 		if isRawText(n.Parent) {
@@ -154,16 +200,39 @@ func writeXHTML(sb *strings.Builder, n *html.Node) {
 			sb.WriteString(escapeText(n.Data))
 		}
 	case html.ElementNode:
+		for _, key := range wantedKeys(n, wanted) {
+			*marks = append(*marks, anchorMark{key: key, off: sb.Len()})
+		}
 		if n.FirstChild == nil {
 			sb.WriteString(startTag(n, true))
 			return
 		}
 		sb.WriteString(startTag(n, false))
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			writeXHTML(sb, child)
+			writeXHTML(sb, child, wanted, marks)
 		}
 		sb.WriteString("</" + n.Data + ">")
 	}
+}
+
+// wantedKeys returns the entries of wanted this element satisfies, via its
+// id or — for <a> elements, as in older EPUBs — its name attribute.
+func wantedKeys(n *html.Node, wanted map[string]bool) []string {
+	if len(wanted) == 0 || n.Type != html.ElementNode {
+		return nil
+	}
+	var keys []string
+	for _, a := range n.Attr {
+		if a.Namespace != "" || a.Val == "" {
+			continue
+		}
+		if a.Key == "id" || (a.Key == "name" && n.Data == "a") {
+			if wanted[a.Val] {
+				keys = append(keys, a.Val)
+			}
+		}
+	}
+	return keys
 }
 
 func isRawText(n *html.Node) bool {

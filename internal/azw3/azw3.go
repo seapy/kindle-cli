@@ -9,13 +9,18 @@
 // The cdetype (EXTH 501) is written at generation time, so no post-patching
 // is needed.
 //
+// In-book hyperlinks (footnote jumps, cross-references) become real KF8
+// position links: hrefs are written as fixed-width placeholders, chunking
+// records where every link target lands, and the placeholders are patched
+// to kindle:pos:fid:off form (see links.go). JPEG/PNG/GIF images are
+// embedded byte-for-byte — no re-encoding, transparency preserved; only
+// device-unsafe variants (progressive/CMYK JPEG, other formats) are
+// re-encoded as JPEG (see images.go).
+//
 // Known simplifications, chosen to keep sideloaded reflowable books working
 // well rather than to cover every EPUB feature:
 //   - embedded fonts are dropped (@font-face is stripped; the device renders
 //     with its built-in fonts, which cover CJK)
-//   - in-book hyperlinks (e.g. footnote jumps) are flattened to plain text,
-//     because KF8 position links need offsets this writer does not compute
-//   - images are re-encoded as JPEG; transparency is composited onto white
 package azw3
 
 import (
@@ -83,27 +88,11 @@ var skeletonTemplate = template.Must(template.New("skeleton").Funcs(template.Fun
 // Write renders book to an AZW3 file at outPath. It returns non-fatal
 // warnings (skipped images, missing cover, …).
 func Write(book *epub.Book, outPath string, opts Options) ([]string, error) {
-	c := &converter{book: book, imageIndex: map[string]int{}}
+	c := newConverter(book)
 
-	var chapters []mobi.Chapter
-	for i, ch := range book.Chapters {
-		chunks, err := c.chapterChunks(ch)
-		if err != nil {
-			return c.warnings, fmt.Errorf("chapter %s: %w", ch.Path, err)
-		}
-		if len(chunks) == 0 {
-			continue
-		}
-		for j := range chunks {
-			chunks[j] += chunkClose // the skeleton ends open at <body aid="…">
-		}
-		chapters = append(chapters, mobi.Chapter{
-			Title:  chapterTitle(ch, i),
-			Chunks: mobi.Chunks(chunks...),
-		})
-	}
-	if len(chapters) == 0 {
-		return c.warnings, fmt.Errorf("no chapters with content")
+	chapters, err := c.assemble()
+	if err != nil {
+		return c.warnings, err
 	}
 
 	title := opts.Title
@@ -127,7 +116,7 @@ func Write(book *epub.Book, outPath string, opts Options) ([]string, error) {
 		Language:    parseLanguage(book.Language),
 		Chapters:    chapters,
 		CSSFlows:    []string{stripFontFaces(strings.Join(book.CSS, "\n"))},
-		Images:      c.images,
+		Images:      c.libraryImages(),
 		// deterministic ID: the fake ASIN derived from it stays stable across
 		// re-conversions, so replacing a book on-device works cleanly
 		UniqueID: crc32.ChecksumIEEE([]byte(title + "\x00" + author)),
@@ -149,43 +138,124 @@ func Write(book *epub.Book, outPath string, opts Options) ([]string, error) {
 		return c.warnings, err
 	}
 	defer f.Close()
-	if err := writeRealized(mb, f); err != nil {
+	if err := writeRealized(mb, c.assets, f); err != nil {
 		return c.warnings, fmt.Errorf("writing AZW3: %w", err)
 	}
 	return c.warnings, nil
 }
 
-// writeRealized isolates the library call: mobi.Book.Realize panics on
-// malformed input instead of returning an error.
-func writeRealized(mb mobi.Book, f *os.File) (err error) {
+// writeRealized isolates the library call (mobi.Book.Realize panics on
+// malformed input instead of returning an error) and swaps pass-through
+// image originals in for the placeholder records before writing.
+func writeRealized(mb mobi.Book, assets []imageAsset, f *os.File) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("KF8 serialization failed: %v", r)
 		}
 	}()
-	return mb.Realize().Write(f)
+	db := mb.Realize()
+	if err := replaceImageRecords(&db, assets); err != nil {
+		return err
+	}
+	return db.Write(f)
 }
 
 type converter struct {
 	book       *epub.Book
-	images     []image.Image
+	assets     []imageAsset
 	imageIndex map[string]int // zip path → 1-based KF8 resource index
 	warnings   []string
+
+	docIDs      map[string]map[string]bool // doc zip path → ids present, pre-rewrite
+	linkSerials map[linkTarget]int         // target → placeholder serial
+	linkTargets []linkTarget               // serial → target
+}
+
+func newConverter(book *epub.Book) *converter {
+	return &converter{
+		book:        book,
+		imageIndex:  map[string]int{},
+		linkSerials: map[linkTarget]int{},
+	}
 }
 
 func (c *converter) warn(format string, args ...any) {
 	c.warnings = append(c.warnings, fmt.Sprintf(format, args...))
 }
 
-// chapterChunks extracts the document's <body> content, rewrites it for KF8,
-// and serializes it as one or more well-formed XHTML chunks.
-func (c *converter) chapterChunks(ch epub.Chapter) ([]string, error) {
-	body := parseBody(ch.HTML)
-	if body == nil {
-		return nil, nil
+// assemble runs the EPUB→KF8 chapter pipeline. All documents are parsed and
+// rewritten before any is chunked, because rewriting doc A can register link
+// targets that chunking doc B must locate; chunking then yields the global
+// chunk numbering that position links encode, and a final same-length patch
+// turns the placeholder hrefs into kindle:pos links.
+func (c *converter) assemble() ([]mobi.Chapter, error) {
+	type parsedChapter struct {
+		src  epub.Chapter
+		idx  int // spine index, for untitled-chapter numbering
+		body *html.Node
 	}
-	c.rewrite(body, ch.Path)
+	var parsed []parsedChapter
+	for i, ch := range c.book.Chapters {
+		if body := parseBody(ch.HTML); body != nil {
+			parsed = append(parsed, parsedChapter{src: ch, idx: i, body: body})
+		}
+	}
 
+	// link-target inventory, before rewriting mutates the trees
+	c.docIDs = make(map[string]map[string]bool, len(parsed))
+	for _, pc := range parsed {
+		ids := map[string]bool{}
+		collectIDs(pc.body, ids)
+		c.docIDs[pc.src.Path] = ids
+	}
+	for _, pc := range parsed {
+		c.rewrite(pc.body, pc.src.Path)
+	}
+
+	type builtChapter struct {
+		title  string
+		chunks []string
+	}
+	var built []builtChapter
+	anchors := map[linkTarget]fidPos{}
+	bookOrder := make([]string, 0, len(parsed))
+	nextFid := 0
+	for _, pc := range parsed {
+		bookOrder = append(bookOrder, pc.src.Path)
+		chunks, anc := c.chunkChapter(pc.body, pc.src.Path)
+		if len(chunks) == 0 {
+			continue
+		}
+		anchors[linkTarget{path: pc.src.Path}] = fidPos{fid: nextFid}
+		for key, pos := range anc {
+			anchors[linkTarget{path: pc.src.Path, id: key}] = fidPos{fid: nextFid + pos.chunk, off: pos.off}
+		}
+		built = append(built, builtChapter{title: chapterTitle(pc.src, pc.idx), chunks: chunks})
+		nextFid += len(chunks)
+	}
+	if len(built) == 0 {
+		return nil, fmt.Errorf("no chapters with content")
+	}
+
+	replacer := c.linkReplacer(anchors, bookOrder)
+	var chapters []mobi.Chapter
+	for _, b := range built {
+		chunks := make([]mobi.Chunk, len(b.chunks))
+		for i, chunk := range b.chunks {
+			if replacer != nil {
+				chunk = replacer.Replace(chunk)
+			}
+			// the skeleton ends open at <body aid="…">
+			chunks[i] = mobi.Chunk{Body: chunk + chunkClose}
+		}
+		chapters = append(chapters, mobi.Chapter{Title: b.title, Chunks: chunks})
+	}
+	return chapters, nil
+}
+
+// chunkChapter serializes a rewritten <body> as one or more well-formed
+// XHTML chunks, tracking where this document's link targets land.
+func (c *converter) chunkChapter(body *html.Node, path string) ([]string, map[string]chunkPos) {
 	var nodes []*html.Node
 	hasContent := false
 	for n := body.FirstChild; n != nil; n = n.NextSibling {
@@ -216,11 +286,12 @@ func (c *converter) chapterChunks(ch epub.Chapter) ([]string, error) {
 			Attr:     kept,
 		}
 	}
-	return splitNodes(nodes, wrapper, maxChunkBytes), nil
+	return splitNodes(nodes, wrapper, maxChunkBytes, c.wantedFor(path))
 }
 
 // rewrite walks the tree rewriting resource references to kindle: URIs,
-// flattening in-book links, and dropping scripts.
+// turning in-book links into position-link placeholders (links.go), and
+// dropping scripts.
 func (c *converter) rewrite(n *html.Node, docPath string) {
 	var next *html.Node
 	for child := n.FirstChild; child != nil; child = next {
@@ -262,7 +333,8 @@ func (c *converter) rewriteImg(n *html.Node, docPath string) {
 }
 
 // svgToImg converts the common "SVG-wrapped cover" pattern
-// (<svg><image xlink:href="…"/></svg>) into a plain <img>.
+// (<svg><image xlink:href="…"/></svg>) into a plain <img>, keeping the
+// svg's id so links targeting it still resolve.
 func (c *converter) svgToImg(svg *html.Node, docPath string) *html.Node {
 	imageNode := findByTag(svg, "image")
 	if imageNode == nil {
@@ -273,52 +345,44 @@ func (c *converter) svgToImg(svg *html.Node, docPath string) *html.Node {
 			continue
 		}
 		if ref := c.embedRef(docPath, a.Val); ref != "" {
+			attrs := []html.Attribute{{Key: "src", Val: ref}}
+			for _, sa := range svg.Attr {
+				if sa.Namespace == "" && sa.Key == "id" && sa.Val != "" {
+					attrs = append(attrs, html.Attribute{Key: "id", Val: sa.Val})
+					break
+				}
+			}
 			return &html.Node{
 				Type:     html.ElementNode,
 				DataAtom: atom.Img,
 				Data:     "img",
-				Attr:     []html.Attribute{{Key: "src", Val: ref}},
+				Attr:     attrs,
 			}
 		}
 	}
 	return nil
 }
 
-func (c *converter) rewriteAnchor(n *html.Node, docPath string) {
-	for i, a := range n.Attr {
-		if a.Key != "href" {
-			continue
-		}
-		href := strings.TrimSpace(a.Val)
-		if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") ||
-			strings.HasPrefix(href, "mailto:") {
-			continue
-		}
-		// in-book link: neutralize but keep the text content
-		n.Attr = append(n.Attr[:i], n.Attr[i+1:]...)
-		return
-	}
-}
-
 // embedRef returns the kindle:embed URI for an image reference, registering
-// (and decoding) the image on first use. Empty when the image is unusable.
+// (and classifying) the image on first use. Empty when the image is unusable.
 func (c *converter) embedRef(docPath, ref string) string {
 	p := epub.ResolveRelative(docPath, ref)
 	idx, ok := c.imageIndex[p]
 	if !ok {
-		img := c.decode(p)
-		if img == nil {
+		asset, usable := c.loadAsset(p)
+		if !usable {
 			return ""
 		}
-		c.images = append(c.images, img)
-		idx = len(c.images)
+		c.assets = append(c.assets, asset)
+		idx = len(c.assets)
 		c.imageIndex[p] = idx
 	}
-	return fmt.Sprintf("kindle:embed:%v?mime=image/jpeg", records.To32(idx))
+	return fmt.Sprintf("kindle:embed:%v?mime=%s", records.To32(idx), c.assets[idx-1].mime)
 }
 
-// decode reads an image from the EPUB, flattening transparency onto white
-// (the KF8 writer re-encodes everything as JPEG, which has no alpha).
+// decode reads an image from the EPUB for the cover/thumbnail path, which
+// stays on the decode-and-re-encode route (the thumbnail is scaled anyway),
+// flattening transparency onto white (JPEG has no alpha).
 func (c *converter) decode(zipPath string) image.Image {
 	data, ok := c.book.Images[zipPath]
 	if !ok {

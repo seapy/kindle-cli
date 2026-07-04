@@ -57,14 +57,21 @@ EPUB ──①convert (built-in, PDOC-tagged)──▶ AZW3 ──②push──�
 ### Conversion notes
 
 The built-in converter targets reflowable books (novels, non-fiction) and
-keeps them intact — text, images, stylesheet, chapter TOC, metadata. A few
-EPUB features are intentionally simplified:
+keeps them intact — text, images, stylesheet, chapter TOC, metadata,
+in-book links:
+
+- **Footnote jumps and cross-references work.** In-book hyperlinks are
+  converted to KF8 position links (`kindle:pos:fid:…:off:…`), the same form
+  Kindle Store books use, so tap-to-jump behaves natively on-device.
+- **Images are embedded byte-for-byte.** JPEG/PNG/GIF originals go in
+  unchanged — no generation loss, PNG transparency preserved. Only variants
+  Kindle firmware can't render (progressive or CMYK JPEG, other formats) are
+  re-encoded as baseline JPEG.
+
+One EPUB feature is intentionally simplified:
 
 - **Embedded fonts are dropped.** The device renders with its built-in fonts
   (which cover CJK); this also shrinks the output dramatically.
-- **In-book hyperlinks (e.g. footnote jumps) become plain text.** The note
-  text itself is retained, only the tap-to-jump is lost.
-- **Images are re-encoded as JPEG** (transparency is flattened onto white).
 
 ## Requirements
 
