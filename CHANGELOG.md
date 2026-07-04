@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.0.2] - 2026-07-05
 
 ### Added
 - `kindle-cli ls` 서브커맨드: 연결된 기기의 documents/ 목록을 크기·cdetype
