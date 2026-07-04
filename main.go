@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -17,7 +18,20 @@ import (
 	"github.com/seapy/kindle-cli/internal/patch"
 )
 
-const version = "0.0.1"
+// version is stamped by goreleaser (-X main.version=…) on release builds;
+// the git tag is the single source of truth, nothing to bump in source.
+var version = ""
+
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	// `go install …@vX.Y.Z` builds carry the module version instead
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return "dev"
+}
 
 type options struct {
 	noPush    bool
@@ -277,7 +291,7 @@ options:
 	fs.Parse(os.Args[1:])
 
 	if showVersion {
-		fmt.Printf("kindle-cli %s\n", version)
+		fmt.Printf("kindle-cli %s\n", versionString())
 		return 0
 	}
 	if fs.NArg() == 0 {

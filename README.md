@@ -84,6 +84,10 @@ dependencies** and cross-compiles for Linux, macOS, and Windows.
 
 ## Install
 
+Grab a prebuilt binary for Linux/macOS/Windows from
+[**Releases**](https://github.com/seapy/kindle-cli/releases), or build it
+yourself:
+
 ```console
 # with Go 1.25+
 go install github.com/seapy/kindle-cli@latest

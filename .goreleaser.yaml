@@ -1,0 +1,52 @@
+# goreleaser 설정 — `git tag vX.Y.Z && git push --tags` 로 릴리스가 시작되면
+# GitHub Actions(.github/workflows/release.yml)가 이 파일대로 빌드·배포한다.
+version: 2
+
+project_name: kindle-cli
+
+builds:
+  - main: .
+    binary: kindle-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^ci"
+      - "^test"
+
+release:
+  footer: |
+    ---
+    자세한 변경 내역은 [CHANGELOG.md](https://github.com/seapy/kindle-cli/blob/main/CHANGELOG.md) 참고.
+
+    > 기기 푸시(MTP)는 Linux 전용입니다(`gio`/`gvfs-mtp` 필요). macOS/Windows
+    > 바이너리는 EPUB → AZW3(PDOC) 변환까지 동작하며, 변환된 파일을 직접
+    > 기기에 복사하면 됩니다.
