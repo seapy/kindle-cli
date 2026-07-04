@@ -1,0 +1,16 @@
+# Go build artifacts
+/kindle-cli
+/kindle-cli.exe
+/dist/
+
+# ebooks — never commit personal books / build artifacts
+*.epub
+*.azw3
+*.azw
+*.mobi
+*.kfx
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/

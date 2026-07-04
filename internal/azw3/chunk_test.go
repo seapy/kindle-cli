@@ -1,0 +1,218 @@
+package azw3
+
+import (
+	"bytes"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"strings"
+	"testing"
+
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
+)
+
+// bodyNodes parses an HTML fragment and returns the children of <body>.
+func bodyNodes(t *testing.T, fragment string) []*html.Node {
+	t.Helper()
+	doc, err := html.Parse(strings.NewReader("<html><body>" + fragment + "</body></html>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := findElement(doc, atom.Body)
+	var nodes []*html.Node
+	for n := body.FirstChild; n != nil; n = n.NextSibling {
+		nodes = append(nodes, n)
+	}
+	return nodes
+}
+
+// assertWellFormedXML fails when chunk is not parseable as strict XML —
+// which is how Kindle firmware reads KF8 parts.
+func assertWellFormedXML(t *testing.T, chunk string) {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader("<root>" + chunk + "</root>"))
+	for {
+		_, err := dec.Token()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			t.Fatalf("chunk is not well-formed XML: %v\n%s", err, chunk)
+		}
+	}
+}
+
+// visibleText extracts the concatenated text content of a chunk.
+func visibleText(t *testing.T, chunk string) string {
+	t.Helper()
+	doc, err := html.Parse(strings.NewReader(chunk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			sb.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return sb.String()
+}
+
+func TestSplitSmallContentIsSingleChunk(t *testing.T) {
+	nodes := bodyNodes(t, "<p>hello</p><p>world</p>")
+	chunks := splitNodes(nodes, nil, maxChunkBytes)
+	if len(chunks) != 1 {
+		t.Fatalf("chunks = %d, want 1", len(chunks))
+	}
+	if chunks[0] != "<p>hello</p><p>world</p>" {
+		t.Errorf("chunk = %q", chunks[0])
+	}
+}
+
+func TestSplitLargeChapter(t *testing.T) {
+	// ~100 paragraphs of Korean text, well past one chunk
+	var frag strings.Builder
+	var wantText strings.Builder
+	for i := 0; i < 100; i++ {
+		para := fmt.Sprintf("문단 %d — %s", i, strings.Repeat("한국어 본문 텍스트. ", 20))
+		frag.WriteString("<p>" + para + "</p>")
+		wantText.WriteString(para)
+	}
+	chunks := splitNodes(bodyNodes(t, frag.String()), nil, maxChunkBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	var gotText strings.Builder
+	for _, chunk := range chunks {
+		if len(chunk) > maxChunkBytes+200 {
+			t.Errorf("chunk exceeds limit: %d bytes", len(chunk))
+		}
+		assertWellFormedXML(t, chunk)
+		gotText.WriteString(visibleText(t, chunk))
+	}
+	if gotText.String() != wantText.String() {
+		t.Error("text content changed across chunk splits")
+	}
+}
+
+func TestSplitReopensWrappingElement(t *testing.T) {
+	// one huge <div> that must be split internally
+	var frag strings.Builder
+	frag.WriteString(`<div class="chapter">`)
+	for i := 0; i < 100; i++ {
+		frag.WriteString("<p>" + strings.Repeat("본문. ", 40) + "</p>")
+	}
+	frag.WriteString("</div>")
+	chunks := splitNodes(bodyNodes(t, frag.String()), nil, maxChunkBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		assertWellFormedXML(t, chunk)
+		if !strings.HasPrefix(chunk, `<div class="chapter">`) {
+			t.Errorf("chunk %d does not reopen the wrapping div: %.60s", i, chunk)
+		}
+		if !strings.HasSuffix(chunk, "</div>") {
+			t.Errorf("chunk %d does not close the wrapping div: …%s", i, chunk[len(chunk)-30:])
+		}
+	}
+}
+
+func TestSplitAppliesWrapperToEveryChunk(t *testing.T) {
+	wrapper := &html.Node{
+		Type: html.ElementNode, DataAtom: atom.Div, Data: "div",
+		Attr: []html.Attribute{{Key: "class", Val: "main"}},
+	}
+	var frag strings.Builder
+	for i := 0; i < 60; i++ {
+		frag.WriteString("<p>" + strings.Repeat("텍스트 ", 60) + "</p>")
+	}
+	chunks := splitNodes(bodyNodes(t, frag.String()), wrapper, maxChunkBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !strings.HasPrefix(chunk, `<div class="main">`) || !strings.HasSuffix(chunk, "</div>") {
+			t.Errorf("chunk %d missing wrapper: %.60s", i, chunk)
+		}
+		assertWellFormedXML(t, chunk)
+	}
+}
+
+func TestSplitGiantTextNode(t *testing.T) {
+	// a single text run larger than a whole chunk, with entities sprinkled in
+	text := strings.Repeat("글자들 & 기호 <표시> 사이. ", 800)
+	chunks := splitNodes(bodyNodes(t, "<p>"+html.EscapeString(text)+"</p>"), nil, maxChunkBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	var got strings.Builder
+	for _, chunk := range chunks {
+		assertWellFormedXML(t, chunk)
+		got.WriteString(visibleText(t, chunk))
+	}
+	if got.String() != text {
+		t.Error("giant text node corrupted by splitting")
+	}
+}
+
+func TestRenderXHTMLVoidElements(t *testing.T) {
+	nodes := bodyNodes(t, `<p>a<br>b</p><img src="x.jpg" alt="y">`)
+	chunks := splitNodes(nodes, nil, maxChunkBytes)
+	got := strings.Join(chunks, "")
+	if !strings.Contains(got, "<br/>") {
+		t.Errorf("br not self-closed: %s", got)
+	}
+	if !strings.Contains(got, `<img src="x.jpg" alt="y"/>`) {
+		t.Errorf("img not self-closed: %s", got)
+	}
+	assertWellFormedXML(t, got)
+}
+
+func TestRenderXHTMLEscaping(t *testing.T) {
+	nodes := bodyNodes(t, `<p title="a&quot;&lt;b">x &amp; y &lt; z</p>`)
+	got := strings.Join(splitNodes(nodes, nil, maxChunkBytes), "")
+	assertWellFormedXML(t, got)
+	if !strings.Contains(got, "x &amp; y &lt; z") {
+		t.Errorf("text not escaped: %s", got)
+	}
+}
+
+func TestRenderXHTMLDropsNamespacedAttrs(t *testing.T) {
+	nodes := bodyNodes(t, `<p epub:type="pagebreak" xml:lang="ko" class="x">t</p>`)
+	got := strings.Join(splitNodes(nodes, nil, maxChunkBytes), "")
+	if strings.Contains(got, "epub:type") {
+		t.Errorf("undeclared-namespace attr kept: %s", got)
+	}
+	if !strings.Contains(got, `xml:lang="ko"`) || !strings.Contains(got, `class="x"`) {
+		t.Errorf("xml:/plain attrs must survive: %s", got)
+	}
+}
+
+func TestWriteLargeBookChunksAllChapters(t *testing.T) {
+	// end-to-end: a book whose single chapter far exceeds one chunk still
+	// produces a valid AZW3 (exercises multi-chunk chapters through the
+	// full KF8 serialization)
+	var frag bytes.Buffer
+	frag.WriteString("<html><body>")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&frag, "<p>문단 %d %s</p>", i, strings.Repeat("내용 ", 50))
+	}
+	frag.WriteString("</body></html>")
+
+	book := testBook(t)
+	book.Chapters[0].HTML = frag.Bytes()
+	book.Images["EPUB/image/pic.png"] = testPNG(t, 4, 4)
+	book.Images["EPUB/cover.jpg"] = testPNG(t, 100, 150)
+
+	out := t.TempDir() + "/big.azw3"
+	if _, err := Write(book, out, Options{}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+}
