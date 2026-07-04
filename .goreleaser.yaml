@@ -34,19 +34,22 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# release notes come from CHANGELOG.md (extracted by the release workflow
+# and passed via --release-notes), not from commit titles
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs"
-      - "^ci"
-      - "^test"
+  disable: true
 
 release:
+  header: |
+    ## Install
+
+    ```console
+    curl -fsSL https://raw.githubusercontent.com/seapy/kindle-cli/main/install.sh | sh
+    ```
   footer: |
     ---
-    자세한 변경 내역은 [CHANGELOG.md](https://github.com/seapy/kindle-cli/blob/main/CHANGELOG.md) 참고.
+    Full history: [CHANGELOG.md](https://github.com/seapy/kindle-cli/blob/main/CHANGELOG.md)
 
-    > 기기 푸시(MTP)는 Linux 전용입니다(`gio`/`gvfs-mtp` 필요). macOS/Windows
-    > 바이너리는 EPUB → AZW3(PDOC) 변환까지 동작하며, 변환된 파일을 직접
-    > 기기에 복사하면 됩니다.
+    > Device push (MTP) is Linux-only (`gio`/`gvfs-mtp` required). The
+    > macOS/Windows binaries still do the EPUB → AZW3 (PDOC) conversion;
+    > copy the converted file to the device yourself.

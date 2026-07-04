@@ -22,10 +22,15 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Extract release notes from CHANGELOG
+        run: |
+          awk '/^## \[/{n++; next} n==1' CHANGELOG.md > /tmp/release-notes.md
+          cat /tmp/release-notes.md
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=/tmp/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
