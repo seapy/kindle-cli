@@ -84,11 +84,27 @@ dependencies** and cross-compiles for Linux, macOS, and Windows.
 
 ## Install
 
-Grab a prebuilt binary for Linux/macOS/Windows from
-[**Releases**](https://github.com/seapy/kindle-cli/releases), or build it
-yourself:
+```console
+curl -fsSL https://raw.githubusercontent.com/seapy/kindle-cli/main/install.sh | sh
+```
+
+Downloads the latest release binary for your platform (Linux/macOS,
+amd64/arm64), verifies its checksum, and installs it to `~/.local/bin`.
+Customize with environment variables:
 
 ```console
+# different location / pinned version
+KINDLE_CLI_INSTALL_DIR=/usr/local/bin KINDLE_CLI_VERSION=v0.0.1 \
+  curl -fsSL https://raw.githubusercontent.com/seapy/kindle-cli/main/install.sh | sh
+```
+
+<details>
+<summary>Other ways to install</summary>
+
+```console
+# prebuilt binaries, including Windows: grab from Releases
+#   https://github.com/seapy/kindle-cli/releases
+
 # with Go 1.25+
 go install github.com/seapy/kindle-cli@latest
 
@@ -97,6 +113,8 @@ git clone https://github.com/seapy/kindle-cli
 cd kindle-cli
 go build -o kindle-cli .
 ```
+
+</details>
 
 ## Usage
 

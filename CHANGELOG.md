@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `curl … | sh` 원라이너 설치 스크립트(`install.sh`): 플랫폼 자동 감지,
+  최신 릴리스 다운로드, 체크섬 검증 후 `~/.local/bin`에 설치.
+  `KINDLE_CLI_VERSION`/`KINDLE_CLI_INSTALL_DIR`로 버전·위치 지정 가능.
+
 ## [0.0.1] - 2026-07-05
 
 ### Added
